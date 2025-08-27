@@ -1,121 +1,156 @@
 # -*- coding: utf-8 -*-
 """
-AWS PDF Translator - 簡潔實用版本
+AWS PDF翻譯器 - ComfyUI節點
+使用Amazon Bedrock AI和Amazon Translate進行PDF翻譯
 """
 
+import os
+import logging
+import json
+from typing import List, Tuple, Any
 import torch
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-import os
-import logging
-import boto3
-from typing import Tuple, List
 
+# 設置日誌
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class AWSPDFTranslator:
-    """AWS PDF翻譯器"""
+    """AWS PDF翻譯器節點"""
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "pdf_source_path": ("STRING", {
-                    "default": "/Users/dayho/Desktop/IGS_vlakey.pdf", 
+                    "default": "/path/to/source.pdf",
                     "multiline": False,
-                    "placeholder": "PDF source file path"
+                    "placeholder": "PDF來源文件路徑"
                 }),
                 "pdf_target_path": ("STRING", {
-                    "default": "/Users/dayho/Desktop/translated_output.pdf", 
+                    "default": "/path/to/translated_output.txt",
                     "multiline": False,
-                    "placeholder": "PDF target file path"
+                    "placeholder": "翻譯輸出文件路徑"
                 }),
-                "source_language": ([
-                    "en", "zh", "zh-TW", "ja", "ko", "fr", "de", "es", "it", "pt", "ru"
-                ], {
-                    "default": "en"
+                "source_language": ("STRING", {
+                    "default": "en",
+                    "multiline": False,
+                    "placeholder": "源語言代碼 (如: en, zh, ja)"
                 }),
-                "target_language": ([
-                    "zh-TW", "zh", "en", "ja", "ko", "fr", "de", "es", "it", "pt", "ru"
-                ], {
-                    "default": "zh-TW"
+                "target_language": ("STRING", {
+                    "default": "zh-TW",
+                    "multiline": False,
+                    "placeholder": "目標語言代碼 (如: zh-TW, ja, ko)"
                 }),
-                "aws_region": ([
-                    "us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1", "ap-southeast-1"
-                ], {
-                    "default": "us-east-1"
+                "aws_region": ("STRING", {
+                    "default": "us-east-1",
+                    "multiline": False,
+                    "placeholder": "AWS區域"
                 }),
                 "excluded_words": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "用逗號分隔不需要翻譯的詞彙 (可留空)"
+                    "default": "<排除翻譯的字詞>\n每個換行代表一個單字\n例如：\nAWS\nAmazon\nElastiCache\nRedis\nRedis OSS\nMemoryDB\nValkey\nIDC",
+                    "multiline": True,
+                    "placeholder": "每行輸入一個不需要翻譯的詞彙"
                 })
             }
         }
     
     RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("translation_result", "status_report")
+    RETURN_NAMES = ("status_image", "translation_report")
     FUNCTION = "translate_pdf"
-    CATEGORY = "AWS/PDF"
+    CATEGORY = "AWS/Translation"
     
     def translate_pdf(self, pdf_source_path: str, pdf_target_path: str, 
                      source_language: str, target_language: str, 
                      aws_region: str, excluded_words: str) -> Tuple[torch.Tensor, str]:
-        """
-        AWS PDF翻譯主函數
-        """
+        """主要翻譯函數"""
         try:
-            logger.info("🚀 AWS PDF Translator")
+            logger.info("🚀 AWS PDF Translator v4.2 - Stable & Compatible")
             logger.info(f"📄 Source: {pdf_source_path}")
             logger.info(f"📄 Target: {pdf_target_path}")
             logger.info(f"🌐 Translation: {source_language} → {target_language}")
             
-            # 驗證輸入
-            if not os.path.exists(pdf_source_path):
-                return self._create_error_result(f"Source PDF not found: {pdf_source_path}")
+            # 處理排除詞彙 - 支持換行和逗號分隔
+            excluded_list = []
+            if excluded_words.strip():
+                # 首先按換行分割
+                lines = excluded_words.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    # 過濾掉指導性文字
+                    if line and not line.startswith('<') and not line.startswith('每個換行') and not line.startswith('例如'):
+                        # 如果行中包含逗號，再按逗號分割
+                        if ',' in line:
+                            words = [word.strip() for word in line.split(',') if word.strip()]
+                            excluded_list.extend(words)
+                        else:
+                            excluded_list.append(line)
             
-            # 處理排除詞彙
-            excluded_list = [word.strip() for word in excluded_words.split(',') if word.strip()]
+            # 去重並保持順序
+            excluded_list = list(dict.fromkeys(excluded_list))
+            if excluded_list:
+                logger.info(f"🚫 Excluded words ({len(excluded_list)}): {excluded_list}")
+            else:
+                logger.info("🚫 No excluded words specified")
             
             # 步驟1: 提取PDF文字
             logger.info("📖 Extracting text from PDF with AI content analysis")
             pages_text = self._extract_pdf_text(pdf_source_path, aws_region)
             
             if not pages_text:
-                return self._create_error_result("Failed to extract text from PDF")
+                return self._create_error_result("No text extracted from PDF")
             
             # 步驟2: 翻譯文字
-            logger.info("🌐 Translating with Amazon Translate")
+            logger.info(f"🌐 Translating {len(pages_text)} pages with Amazon Translate")
             translated_pages = self._translate_pages(pages_text, source_language, target_language, aws_region, excluded_list)
             
-            # 步驟3: 創建翻譯PDF（保持原格式）
-            logger.info("📝 Creating translated PDF with original format")
-            success = self._create_overlay_pdf(pdf_source_path, pages_text, translated_pages, pdf_target_path)
+            if not translated_pages:
+                return self._create_error_result("Translation failed")
             
-            if not success:
-                # 如果PDF覆蓋失敗，回退到文字文件
-                logger.warning("📝 PDF overlay failed, creating text file as fallback")
-                success = self._create_translation_text_file(pages_text, translated_pages, pdf_target_path)
+            # 步驟3: 創建翻譯文字文件
+            logger.info("📝 Creating translation text file")
+            success = self._create_translation_text_file(pages_text, translated_pages, pdf_target_path)
             
             if not success:
                 return self._create_error_result("Failed to create translation file")
             
-            # 步驟4: 創建結果圖像
-            result_image = self._create_result_image(pages_text, translated_pages)
-            
             # 生成狀態報告
-            if success and output_path.endswith('.pdf'):
-                status_report = self._generate_status_report(len(pages_text), pdf_target_path, pages_text, translated_pages)
-            else:
-                txt_output_path = pdf_target_path.replace('.pdf', '_translation.txt')
-                status_report = self._generate_status_report(len(pages_text), txt_output_path, pages_text, translated_pages)
+            txt_output_path = pdf_target_path.replace('.pdf', '_translation.txt')
+            status_report = self._generate_status_report(len(pages_text), txt_output_path, pages_text, translated_pages)
+            
+            # 創建成功狀態圖像
+            status_image = self._create_success_image()
             
             logger.info("✅ Translation completed successfully!")
-            return (result_image, status_report)
+            return (status_image, status_report)
             
         except Exception as e:
             logger.error(f"❌ Translation failed: {e}")
             return self._create_error_result(f"Translation failed: {str(e)}")
+    
+    def _extract_pdf_text(self, pdf_path: str, aws_region: str = None) -> List[str]:
+        """提取PDF文字"""
+        try:
+            import pdfplumber
+            
+            pages_text = []
+            with pdfplumber.open(pdf_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text()
+                    if text:
+                        logger.info(f"  🤖 AI analyzing page {i+1} content...")
+                        # 使用AI清理和過濾文字
+                        cleaned_text = self._ai_filter_content(text, aws_region)
+                        if cleaned_text:
+                            pages_text.append(cleaned_text)
+            
+            logger.info(f"✅ AI extracted and filtered text from {len(pages_text)} pages")
+            return pages_text
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to extract PDF text: {e}")
+            return []
     
     def _ai_filter_content(self, text: str, aws_region: str) -> str:
         """使用AI智能過濾內容"""
@@ -129,19 +164,26 @@ class AWSPDFTranslator:
             bedrock_client = boto3.client('bedrock-runtime', region_name=aws_region)
             
             # 構建AI分析prompt
-            prompt = f"""請分析以下從PDF提取的文字，判斷哪些是簡報的核心內容，哪些是元數據（如版權信息、頁碼、頁眉頁腳等）。
+            prompt = f"""請分析以下從PDF提取的文字，保留簡報的核心內容，移除不必要的元數據。
 
-只保留簡報的核心內容，移除以下類型的文字：
-- 版權聲明和法律聲明
+保留以下內容：
+- 標題和主要內容
+- 技術說明和功能描述
+- 重要的業務信息
+- 產品特性和優勢
+
+移除以下內容：
+- 版權聲明 (© 2025, Amazon Web Services, Inc...)
 - 頁碼和頁面標記
-- 頁眉和頁腳信息
-- 公司標準免責聲明
-- 文檔元數據
+- "All rights reserved" 等法律聲明
+- 重複的公司免責聲明
+
+重要：保持內容的完整性和可讀性，不要過度刪減。
 
 原始文字：
 {text}
 
-請只返回清理後的核心內容，不要添加任何解釋："""
+清理後的內容："""
 
             # 調用Claude進行內容分析
             body = {
@@ -179,7 +221,7 @@ class AWSPDFTranslator:
         """回退的內容過濾方法"""
         import re
         
-        # 簡單的正則表達式過濾作為回退
+        # 簡單的正則表達式過濾
         copyright_patterns = [
             r'©\s*\d{4}.*?All rights reserved\.?',
             r'Copyright.*?\d{4}.*?reserved\.?',
@@ -196,235 +238,304 @@ class AWSPDFTranslator:
         
         return cleaned_text
     
-    def _clean_and_filter_text(self, text: str, aws_region: str = None) -> str:
-        """清理和過濾文字內容 - 使用AI智能分析"""
-        if not text:
-            return ""
-        
-        # 使用AI智能過濾
-        if aws_region:
-            return self._ai_filter_content(text, aws_region)
-        else:
-            return self._fallback_filter_content(text)
-    
-    def _extract_pdf_text(self, pdf_path: str, aws_region: str = None) -> List[str]:
-        """提取PDF文字"""
+    def _translate_pages(self, pages_text: List[str], source_lang: str, target_lang: str, 
+                        aws_region: str, excluded_words: List[str]) -> List[str]:
+        """翻譯所有頁面"""
         try:
-            import pdfplumber
+            import boto3
             
-            pages_text = []
-            with pdfplumber.open(pdf_path) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text()
-                    if text:
-                        logger.info(f"  🤖 AI analyzing page {i+1} content...")
-                        # 使用AI清理和過濾文字
-                        cleaned_text = self._clean_and_filter_text(text, aws_region)
-                        if cleaned_text:  # 只添加有內容的頁面
-                            pages_text.append(cleaned_text)
-            
-            logger.info(f"✅ AI extracted and filtered text from {len(pages_text)} pages")
-            return pages_text
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to extract PDF text: {e}")
-            return []
-    
-    def _translate_pages(self, pages_text: List[str], source_lang: str, 
-                        target_lang: str, aws_region: str, excluded_words: List[str]) -> List[str]:
-        """翻譯頁面文字"""
-        try:
             translate_client = boto3.client('translate', region_name=aws_region)
             translated_pages = []
             
             for i, text in enumerate(pages_text):
-                if not text.strip():
-                    translated_pages.append("")
-                    continue
-                
                 logger.info(f"  🔄 Translating page {i+1}")
                 
-                # 直接翻譯文字（不使用保護機制）
-                translated_text = self._translate_text(text, source_lang, target_lang, translate_client)
-                
-                # 後處理：手動保護重要詞彙
-                if excluded_words:
-                    translated_text = self._post_process_translation(translated_text, excluded_words)
-                
+                # 翻譯文字（保護排除詞彙）
+                translated_text = self._translate_with_protection(text, source_lang, target_lang, translate_client, excluded_words)
                 translated_pages.append(translated_text)
+                
                 logger.info(f"    ✅ Page {i+1} translated")
             
             return translated_pages
             
         except Exception as e:
-            logger.error(f"❌ Failed to translate pages: {e}")
-            return pages_text  # 返回原文
+            logger.error(f"❌ Translation failed: {e}")
+            return []
     
-    def _should_exclude_text(self, text: str, excluded_words: List[str]) -> bool:
-        """檢查文字是否包含過多排除詞彙"""
-        if not excluded_words or not text.strip():
-            return False
-        
-        # 計算排除詞彙的密度
-        text_lower = text.lower()
-        total_words = len(text.split())
-        excluded_count = 0
-        
-        for word in excluded_words:
-            if word.lower() in text_lower:
-                # 計算該詞彙出現次數
-                excluded_count += text_lower.count(word.lower())
-        
-        # 如果排除詞彙佔比超過30%，才跳過翻譯
-        if total_words > 0:
-            exclusion_ratio = excluded_count / total_words
-            return exclusion_ratio > 0.3
-        
-        return False
-    
-    def _post_process_translation(self, translated_text: str, excluded_words: List[str]) -> str:
-        """後處理翻譯，恢復重要詞彙的英文形式"""
-        if not excluded_words or not translated_text:
-            return translated_text
-        
-        import re
-        
-        # 常見的翻譯對應，手動恢復
-        replacements = {
-            'AWS': ['AWS', 'aws', '亞馬遜網路服務', 'Amazon Web Services'],
-            'Amazon': ['Amazon', 'amazon', '亞馬遜', '亞馬遜公司'],
-            'ElastiCache': ['ElastiCache', 'elasticache', '彈性快取', '彈性緩存'],
-            'Redis': ['Redis', 'redis'],
-            'Valkey': ['Valkey', 'valkey'],
-            'API': ['API', 'api', '應用程式介面'],
-            'SDK': ['SDK', 'sdk', '軟體開發套件'],
-            'JSON': ['JSON', 'json'],
-            'HTTP': ['HTTP', 'http'],
-            'URL': ['URL', 'url', '網址'],
-            'PDF': ['PDF', 'pdf']
-        }
-        
-        result = translated_text
-        
-        for original_word in excluded_words:
-            if original_word in replacements:
-                for variant in replacements[original_word]:
-                    # 使用正則表達式進行替換，保持大小寫
-                    pattern = re.escape(variant)
-                    result = re.sub(pattern, original_word, result, flags=re.IGNORECASE)
-        
-        return result
-    
-    def _translate_text_with_protection(self, text: str, source_lang: str, target_lang: str, 
-                                       translate_client, excluded_words: List[str]) -> str:
+    def _translate_with_protection(self, text: str, source_lang: str, target_lang: str, 
+                                  translate_client, excluded_words: List[str]) -> str:
         """翻譯文字並保護排除詞彙"""
-        try:
-            if not excluded_words:
-                return self._translate_text(text, source_lang, target_lang, translate_client)
-            
-            # 創建佔位符保護排除詞彙
-            protected_text = text
-            placeholders = {}
-            
-            for i, word in enumerate(excluded_words):
-                if word.lower() in text.lower():
-                    placeholder = f"__PROTECTED_{i}__"
-                    placeholders[placeholder] = word
-                    # 使用正則表達式進行大小寫不敏感的替換
-                    import re
-                    protected_text = re.sub(re.escape(word), placeholder, protected_text, flags=re.IGNORECASE)
-            
-            # 翻譯保護後的文字
-            translated_text = self._translate_text(protected_text, source_lang, target_lang, translate_client)
-            
-            # 恢復排除詞彙
-            for placeholder, original_word in placeholders.items():
-                translated_text = translated_text.replace(placeholder, original_word)
-            
-            return translated_text
-            
-        except Exception as e:
-            logger.error(f"❌ Protected translation failed: {e}")
-            return text  # 返回原文
+        logger.info(f"🔍 DEBUG: Processing text: '{text[:100]}...'")
+        logger.info(f"🔍 DEBUG: Excluded words list: {excluded_words}")
+        
+        if not excluded_words:
+            logger.info("🔍 DEBUG: No excluded words, proceeding with normal translation")
+            return self._translate_text(text, source_lang, target_lang, translate_client)
+        
+        # 步驟1: 用數字標記保護排除詞彙
+        protected_text = text
+        word_map = {}
+        
+        # 按長度排序，先處理長詞彙（避免短詞彙覆蓋長詞彙）
+        sorted_words = sorted([w.strip() for w in excluded_words if w.strip()], key=len, reverse=True)
+        logger.info(f"🔍 DEBUG: Sorted words for protection: {sorted_words}")
+        
+        for i, word in enumerate(sorted_words):
+            if word in text:
+                # 使用純數字標記，不太會被翻譯
+                marker = f"999{i:03d}999"  # 例如: 999000999, 999001999
+                word_map[marker] = word
+                
+                # 使用詞邊界匹配，避免部分匹配
+                import re
+                # 對於包含空格的短語，直接替換
+                if ' ' in word:
+                    protected_text = protected_text.replace(word, marker)
+                else:
+                    # 對於單詞，使用詞邊界匹配
+                    pattern = r'\b' + re.escape(word) + r'\b'
+                    protected_text = re.sub(pattern, marker, protected_text, flags=re.IGNORECASE)
+                
+                logger.info(f"    🛡️ Protected: '{word}' → {marker}")
+            else:
+                logger.info(f"    ❌ Word '{word}' not found in text")
+        
+        logger.info(f"🔍 DEBUG: Protected text: '{protected_text[:100]}...'")
+        
+        # 步驟2: 翻譯保護後的文字
+        translated_text = self._translate_text(protected_text, source_lang, target_lang, translate_client)
+        logger.info(f"🔍 DEBUG: Translated text: '{translated_text[:100]}...'")
+        
+        # 步驟3: 恢復原始詞彙
+        for marker, original_word in word_map.items():
+            if marker in translated_text:
+                translated_text = translated_text.replace(marker, original_word)
+                logger.info(f"    🔄 Restored: {marker} → '{original_word}'")
+            else:
+                logger.warning(f"    ⚠️ Marker {marker} not found in translation!")
+                # 檢查是否有部分標記殘留
+                partial_markers = [m for m in translated_text.split() if '999' in m and m.isdigit()]
+                if partial_markers:
+                    logger.warning(f"    ⚠️ Found partial markers: {partial_markers}")
+                    for partial in partial_markers:
+                        translated_text = translated_text.replace(partial, original_word)
+                        logger.info(f"    🔄 Fixed partial marker: {partial} → '{original_word}'")
+        
+        logger.info(f"🔍 DEBUG: Final text: '{translated_text[:100]}...'")
+        return translated_text
     
     def _translate_text(self, text: str, source_lang: str, target_lang: str, translate_client) -> str:
-        """翻譯單個文字"""
+        """翻譯文字"""
         try:
-            # 分段翻譯（避免文字太長）
-            max_length = 4000
-            if len(text) <= max_length:
+            # 檢查是否包含換行，如果有則分段處理
+            if '\n' in text:
+                lines = text.split('\n')
+                translated_lines = []
+                
+                for line in lines:
+                    line = line.strip()
+                    if not line:  # 空行
+                        translated_lines.append('')
+                        continue
+                    
+                    # 翻譯每一行
+                    response = translate_client.translate_text(
+                        Text=line,
+                        SourceLanguageCode=source_lang,
+                        TargetLanguageCode=target_lang
+                    )
+                    translated_line = response['TranslatedText']
+                    
+                    # 後處理：改善翻譯質量
+                    improved_line = self._improve_translation_quality(translated_line, line)
+                    translated_lines.append(improved_line)
+                
+                # 重新組合，保持換行
+                return '\n'.join(translated_lines)
+            
+            else:
+                # 單行文本直接翻譯
                 response = translate_client.translate_text(
                     Text=text,
                     SourceLanguageCode=source_lang,
                     TargetLanguageCode=target_lang
                 )
-                return response['TranslatedText']
-            else:
-                # 分段處理
-                chunks = []
-                words = text.split()
-                current_chunk = ""
+                translated_text = response['TranslatedText']
                 
-                for word in words:
-                    if len(current_chunk + " " + word) <= max_length:
-                        current_chunk = current_chunk + " " + word if current_chunk else word
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk)
-                        current_chunk = word
-                
-                if current_chunk:
-                    chunks.append(current_chunk)
-                
-                # 翻譯每個段落
-                translated_chunks = []
-                for chunk in chunks:
-                    response = translate_client.translate_text(
-                        Text=chunk,
-                        SourceLanguageCode=source_lang,
-                        TargetLanguageCode=target_lang
-                    )
-                    translated_chunks.append(response['TranslatedText'])
-                
-                return ' '.join(translated_chunks)
-                
+                # 後處理：改善翻譯質量
+                improved_text = self._improve_translation_quality(translated_text, text)
+                return improved_text
+            
         except Exception as e:
-            logger.error(f"❌ Translation failed: {e}")
+            logger.error(f"❌ Translation API failed: {e}")
             return text  # 返回原文
     
-    def _create_overlay_pdf(self, original_pdf_path: str, original_pages: List[str], 
-                           translated_pages: List[str], output_path: str) -> bool:
-        """創建覆蓋翻譯的PDF"""
-        try:
-            from .pdf_overlay_writer import PDFOverlayWriter
+    def _improve_translation_quality(self, translation: str, original_text: str) -> str:
+        """通用翻譯質量改善 - 只做基本的格式清理"""
+        import re
+        improved = translation
+        
+        # 1. 基本格式清理（通用）
+        # 清理多餘空格
+        improved = re.sub(r'\s+', ' ', improved).strip()
+        
+        # 清理明顯的標點符號錯誤（通用）
+        improved = re.sub(r'。」', '。', improved)
+        improved = re.sub(r'，」', '，', improved)
+        improved = re.sub(r'」([。，！？])', r'\1', improved)
+        
+        # 2. 處理項目符號格式（通用）
+        if original_text.strip().startswith(('•', '-', '►')):
+            if not improved.strip().startswith(('•', '-', '►')):
+                if original_text.strip().startswith('•'):
+                    improved = '• ' + improved.strip()
+                elif original_text.strip().startswith('-'):
+                    improved = '- ' + improved.strip()
+                elif original_text.strip().startswith('►'):
+                    improved = '► ' + improved.strip()
+        
+        return improved
+        """選擇最佳翻譯結果，基於通用的幻覺檢測"""
+        if len(translations) == 1:
+            # 即使只有一個翻譯，也要檢查和修正幻覺
+            return self._fix_common_hallucinations(translations[0], original_text)
+        
+        # 通用幻覺檢測規則
+        def has_hallucination_signs(translation: str, original: str) -> int:
+            """返回幻覺指數，越高越可能是幻覺"""
+            score = 0
             
-            # 準備頁面數據
-            pages_data = []
-            for i, (original, translated) in enumerate(zip(original_pages, translated_pages)):
-                page_data = {
-                    'page_number': i + 1,
-                    'original_text': original,
-                    'translated_text': translated
-                }
-                pages_data.append(page_data)
+            # 1. 檢查是否包含明顯不相關的數字年份
+            import re
+            year_pattern = r'一九\d+年|二〇\d+年|\d{4}年'
+            if re.search(year_pattern, translation) and not re.search(r'\d{4}', original):
+                score += 20  # 提高分數，這是嚴重的幻覺
+                logger.warning(f"🚨 Detected suspicious year in translation: {translation}")
             
-            # 創建PDF覆蓋寫入器
-            overlay_writer = PDFOverlayWriter()
+            # 2. 檢查特定的幻覺模式
+            hallucination_patterns = [
+                r'一九+年',  # 連續的一九年
+                r'九+年',    # 連續的九年
+                r'國際.*署', # 國際XX署
+                r'工商.*局', # 工商XX局
+            ]
+            for pattern in hallucination_patterns:
+                if re.search(pattern, translation):
+                    score += 15
+                    logger.warning(f"🚨 Detected hallucination pattern: {pattern}")
             
-            # 創建翻譯PDF
-            success = overlay_writer.create_translated_pdf(
-                original_pdf_path, pages_data, output_path
-            )
+            # 3. 檢查長度比例異常
+            original_len = len(original.split())
+            translation_len = len(translation)
+            if original_len > 0:
+                ratio = translation_len / original_len
+                if ratio > 4 or ratio < 0.2:  # 翻譯結果長度嚴重異常
+                    score += 10
+                    logger.warning(f"🚨 Suspicious length ratio: {ratio}")
             
-            # 清理
-            overlay_writer.cleanup()
+            # 4. 檢查英文縮寫是否被錯誤翻譯
+            english_abbrevs = re.findall(r'\b[A-Z]{2,}\b', original)
+            for abbrev in english_abbrevs:
+                if abbrev not in translation and len(abbrev) <= 5:
+                    score += 5
+                    logger.warning(f"🚨 Missing abbreviation: {abbrev}")
             
-            return success
+            return score
+        
+        # 評估每個翻譯
+        best_translation = translations[0]
+        lowest_score = float('inf')
+        
+        for i, translation in enumerate(translations):
+            score = has_hallucination_signs(translation, original_text)
+            logger.info(f"Translation {i+1} hallucination score: {score}")
+            logger.info(f"Translation {i+1}: {translation[:100]}...")
             
-        except Exception as e:
-            logger.error(f"❌ PDF overlay creation failed: {e}")
-            return False
+            if score < lowest_score:
+                lowest_score = score
+                best_translation = translation
+        
+        # 修正選中的翻譯
+        corrected_translation = self._fix_common_hallucinations(best_translation, original_text)
+        
+        if lowest_score > 0:
+            logger.warning(f"⚠️ Applied corrections to translation with hallucination score: {lowest_score}")
+        else:
+            logger.info("✅ Selected translation appears clean")
+        
+        return corrected_translation
     
+    def _fix_common_hallucinations(self, translation: str, original_text: str) -> str:
+        """通用幻覺修正機制 - 基於模式而非特定詞彙"""
+        import re
+        corrected = translation
+        
+        # 1. 通用年份幻覺檢測
+        # 如果原文沒有年份，但翻譯中出現了明顯的幻覺年份模式
+        has_year_in_original = bool(re.search(r'\b\d{4}\b', original_text))
+        
+        if not has_year_in_original:
+            # 移除明顯的幻覺年份模式（連續重複的數字年份）
+            hallucination_patterns = [
+                r'一九{3,}\d*年?',  # 一九九九九年等（3個以上重複）
+                r'二〇{3,}\d*年?',  # 二〇〇〇〇年等
+                r'九{3,}\d*年?',   # 九九九九年等
+                r'零{2,}\d*年?',   # 零零零年等
+            ]
+            
+            for pattern in hallucination_patterns:
+                matches = re.findall(pattern, corrected)
+                if matches:
+                    corrected = re.sub(pattern, '', corrected)
+                    logger.info(f"🔧 Removed hallucination year pattern: {matches}")
+        
+        # 2. 檢測和修正異常長度的翻譯
+        original_length = len(original_text.split())
+        translation_length = len(corrected)
+        
+        if original_length > 0:
+            ratio = translation_length / original_length
+            if ratio > 10:  # 翻譯結果異常長，可能包含幻覺
+                logger.warning(f"⚠️ Translation unusually long (ratio: {ratio:.1f})")
+                # 可以考慮截斷或重新翻譯
+        
+        # 3. 保護原文中的重要術語
+        # 提取原文中的英文縮寫和專有名詞
+        important_terms = []
+        
+        # 英文縮寫（2-6個大寫字母）
+        abbreviations = re.findall(r'\b[A-Z]{2,6}\b', original_text)
+        important_terms.extend(abbreviations)
+        
+        # 專有名詞（首字母大寫的詞）
+        proper_nouns = re.findall(r'\b[A-Z][a-z]{2,}\b', original_text)
+        important_terms.extend(proper_nouns)
+        
+        # 去重
+        important_terms = list(set(important_terms))
+        
+        # 檢查重要術語是否在翻譯中保留
+        missing_terms = []
+        for term in important_terms:
+            if len(term) <= 20 and term not in corrected:
+                missing_terms.append(term)
+        
+        if missing_terms:
+            logger.warning(f"⚠️ Important terms missing in translation: {missing_terms}")
+            # 注意：這裡只記錄，不自動修正，因為可能有合理的翻譯
+        
+        # 4. 清理格式問題
+        # 移除多餘空格
+        corrected = re.sub(r'\s+', ' ', corrected).strip()
+        
+        # 移除開頭的孤立標點符號
+        corrected = re.sub(r'^[-–—•]\s*', '', corrected)
+        
+        # 移除明顯的格式錯誤（如連續的標點符號）
+        corrected = re.sub(r'[。，]{2,}', '，', corrected)
+        
+        return corrected
+
     def _create_translation_text_file(self, original_pages: List[str], translated_pages: List[str], output_path: str) -> bool:
         """創建純文字翻譯文件"""
         try:
@@ -457,7 +568,6 @@ class AWSPDFTranslator:
             # 驗證文件創建
             if os.path.exists(txt_output_path) and os.path.getsize(txt_output_path) > 0:
                 logger.info(f"✅ Translation text file created: {txt_output_path}")
-                logger.info(f"📊 File size: {os.path.getsize(txt_output_path)} bytes")
                 return True
             else:
                 logger.error(f"❌ Text file not created properly")
@@ -465,211 +575,7 @@ class AWSPDFTranslator:
             
         except Exception as e:
             logger.error(f"❌ Failed to create text file: {e}")
-            import traceback
-            traceback.print_exc()
             return False
-    
-    def _create_translated_pdf(self, original_pages: List[str], translated_pages: List[str], output_path: str) -> bool:
-        """創建翻譯PDF - 修復版本"""
-        try:
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.pagesizes import A4
-            
-            logger.info(f"📝 Creating PDF at: {output_path}")
-            
-            # 確保輸出目錄存在
-            output_dir = os.path.dirname(output_path)
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            
-            c = canvas.Canvas(output_path, pagesize=A4)
-            page_width, page_height = A4
-            
-            for i, (original, translated) in enumerate(zip(original_pages, translated_pages)):
-                if i > 0:
-                    c.showPage()
-                
-                logger.info(f"  📄 Creating page {i+1}")
-                
-                # 頁面標題
-                c.setFont("Helvetica-Bold", 16)
-                c.drawString(50, page_height - 50, f"Page {i+1} Translation")
-                
-                y_pos = page_height - 100
-                
-                # 原文區域
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(50, y_pos, "Original Text:")
-                y_pos -= 25
-                
-                c.setFont("Helvetica", 9)
-                if original:
-                    # 更好的文字換行處理
-                    original_lines = self._smart_wrap_text(original, 100)
-                    for line in original_lines[:15]:  # 增加到15行
-                        if line.strip():
-                            # 清理特殊字符
-                            clean_line = self._clean_text_for_pdf(line)
-                            c.drawString(60, y_pos, clean_line)
-                        y_pos -= 11
-                else:
-                    c.drawString(60, y_pos, "[No original text]")
-                    y_pos -= 11
-                
-                y_pos -= 30
-                
-                # 翻譯區域
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(50, y_pos, "Chinese Translation:")
-                y_pos -= 25
-                
-                c.setFont("Helvetica", 9)
-                if translated:
-                    # 處理翻譯文字
-                    translated_lines = self._smart_wrap_text(translated, 80)
-                    for line in translated_lines[:15]:  # 增加到15行
-                        if line.strip():
-                            # 清理和轉換中文字符
-                            clean_line = self._clean_text_for_pdf(line)
-                            try:
-                                c.drawString(60, y_pos, clean_line)
-                            except:
-                                # 如果中文字符有問題，顯示提示
-                                c.drawString(60, y_pos, "[Chinese text - view in text report]")
-                        y_pos -= 11
-                else:
-                    c.drawString(60, y_pos, "[No translation]")
-                
-                # 添加分隔線
-                if y_pos > 100:
-                    c.line(50, y_pos - 20, page_width - 50, y_pos - 20)
-            
-            c.save()
-            
-            # 驗證文件創建
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info(f"✅ PDF created successfully: {output_path}")
-                logger.info(f"📊 File size: {os.path.getsize(output_path)} bytes")
-                return True
-            else:
-                logger.error(f"❌ PDF file not created properly")
-                return False
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create PDF: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def _smart_wrap_text(self, text: str, max_length: int) -> List[str]:
-        """智能文字換行"""
-        if not text:
-            return [""]
-        
-        # 先按句號、逗號等分割
-        sentences = []
-        current = ""
-        
-        for char in text:
-            current += char
-            if char in '.!?。！？' and len(current) > 20:
-                sentences.append(current.strip())
-                current = ""
-        
-        if current.strip():
-            sentences.append(current.strip())
-        
-        # 再按長度換行
-        lines = []
-        for sentence in sentences:
-            if len(sentence) <= max_length:
-                lines.append(sentence)
-            else:
-                # 長句子按單詞分割
-                words = sentence.split()
-                current_line = ""
-                
-                for word in words:
-                    if len(current_line + " " + word) <= max_length:
-                        current_line = current_line + " " + word if current_line else word
-                    else:
-                        if current_line:
-                            lines.append(current_line)
-                        current_line = word
-                
-                if current_line:
-                    lines.append(current_line)
-        
-        return lines if lines else [""]
-    
-    def _clean_text_for_pdf(self, text: str) -> str:
-        """清理文字以適合PDF顯示"""
-        if not text:
-            return ""
-        
-        # 移除或替換問題字符
-        cleaned = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-        
-        # 壓縮多個空格
-        import re
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        
-        # 移除非打印字符，但保留中文
-        result = ""
-        for char in cleaned:
-            # 保留ASCII可打印字符和中文字符
-            if (32 <= ord(char) <= 126) or (0x4e00 <= ord(char) <= 0x9fff):
-                result += char
-            else:
-                result += " "  # 替換為空格
-        
-        return result.strip()
-    
-    def _wrap_text(self, text: str, max_length: int) -> List[str]:
-        """文字換行"""
-        if not text:
-            return [""]
-        
-        words = text.split()
-        lines = []
-        current_line = ""
-        
-        for word in words:
-            if len(current_line + " " + word) <= max_length:
-                current_line = current_line + " " + word if current_line else word
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        
-        if current_line:
-            lines.append(current_line)
-        
-        return lines if lines else [""]
-    
-    def _create_result_image(self, original_pages: List[str], translated_pages: List[str]) -> torch.Tensor:
-        """創建結果圖像"""
-        try:
-            img = Image.new('RGB', (800, 600), 'white')
-            draw = ImageDraw.Draw(img)
-            
-            try:
-                font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 16)
-            except:
-                font = ImageFont.load_default()
-            
-            draw.text((20, 20), "AWS PDF Translation Complete", fill='black', font=font)
-            draw.text((20, 60), f"Pages processed: {len(original_pages)}", fill='blue', font=font)
-            draw.text((20, 100), f"Translation successful", fill='green', font=font)
-            
-            # 轉換為tensor
-            img_array = np.array(img).astype(np.float32) / 255.0
-            return torch.from_numpy(img_array).unsqueeze(0)
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create result image: {e}")
-            empty_img = np.ones((1, 400, 600, 3), dtype=np.float32)
-            return torch.from_numpy(empty_img)
     
     def _generate_status_report(self, pages_count: int, output_path: str, 
                                original_pages: List[str] = None, translated_pages: List[str] = None) -> str:
@@ -679,7 +585,7 @@ class AWSPDFTranslator:
 ✅ Status: Completed Successfully
 📄 Pages processed: {pages_count}
 📁 Output file: {os.path.basename(output_path)}
-🌐 Service: Amazon Translate
+🌐 Service: Amazon Translate + Bedrock AI
 ========================================
 
 📝 Translation Preview:
@@ -687,7 +593,7 @@ class AWSPDFTranslator:
         
         # 添加翻譯預覽
         if original_pages and translated_pages:
-            for i, (original, translated) in enumerate(zip(original_pages[:3], translated_pages[:3])):  # 只顯示前3頁
+            for i, (original, translated) in enumerate(zip(original_pages[:3], translated_pages[:3])):
                 report += f"\n📄 Page {i+1}:\n"
                 report += f"Original: {original[:150]}{'...' if len(original) > 150 else ''}\n"
                 report += f"Translation: {translated[:150]}{'...' if len(translated) > 150 else ''}\n"
@@ -696,8 +602,58 @@ class AWSPDFTranslator:
         report += f"\n✅ Complete translation saved to: {output_path}"
         return report
     
+    def _create_success_image(self) -> torch.Tensor:
+        """創建成功狀態圖像"""
+        # 創建簡單的成功狀態圖像
+        img = Image.new('RGB', (512, 256), color='lightgreen')
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            # 嘗試使用系統字體
+            font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 24)
+        except:
+            font = ImageFont.load_default()
+        
+        # 繪製成功信息
+        draw.text((50, 100), "✅ PDF Translation", fill='darkgreen', font=font)
+        draw.text((50, 140), "Completed Successfully!", fill='darkgreen', font=font)
+        
+        # 轉換為tensor
+        img_array = np.array(img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_array)[None,]
+        
+        return img_tensor
+    
     def _create_error_result(self, error_message: str) -> Tuple[torch.Tensor, str]:
         """創建錯誤結果"""
-        logger.error(f"❌ {error_message}")
-        empty_image = np.zeros((1, 100, 100, 3), dtype=np.float32)
-        return (torch.from_numpy(empty_image), f"❌ Error: {error_message}")
+        # 創建錯誤狀態圖像
+        img = Image.new('RGB', (512, 256), color='lightcoral')
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 20)
+        except:
+            font = ImageFont.load_default()
+        
+        draw.text((50, 100), "❌ Translation Failed", fill='darkred', font=font)
+        draw.text((50, 140), error_message[:30], fill='darkred', font=font)
+        
+        # 轉換為tensor
+        img_array = np.array(img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_array)[None,]
+        
+        error_report = f"""❌ AWS PDF Translation Error
+========================================
+Error: {error_message}
+========================================"""
+        
+        return (img_tensor, error_report)
+
+# 節點映射
+NODE_CLASS_MAPPINGS = {
+    "AWSPDFTranslator": AWSPDFTranslator
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "AWSPDFTranslator": "AWS PDF Translator"
+}
