@@ -1,0 +1,1 @@
+# hoycdanny-amazon-pdf-translate-bedrock-comfyui-node
