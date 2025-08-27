@@ -88,9 +88,14 @@ class AWSPDFTranslator:
             logger.info("🌐 Translating with Amazon Translate")
             translated_pages = self._translate_pages(pages_text, source_language, target_language, aws_region, excluded_list)
             
-            # 步驟3: 創建翻譯文字文件（替代PDF）
-            logger.info("📝 Creating translation text file")
-            success = self._create_translation_text_file(pages_text, translated_pages, pdf_target_path)
+            # 步驟3: 創建翻譯PDF（保持原格式）
+            logger.info("📝 Creating translated PDF with original format")
+            success = self._create_overlay_pdf(pdf_source_path, pages_text, translated_pages, pdf_target_path)
+            
+            if not success:
+                # 如果PDF覆蓋失敗，回退到文字文件
+                logger.warning("📝 PDF overlay failed, creating text file as fallback")
+                success = self._create_translation_text_file(pages_text, translated_pages, pdf_target_path)
             
             if not success:
                 return self._create_error_result("Failed to create translation file")
@@ -99,8 +104,11 @@ class AWSPDFTranslator:
             result_image = self._create_result_image(pages_text, translated_pages)
             
             # 生成狀態報告
-            txt_output_path = pdf_target_path.replace('.pdf', '_translation.txt')
-            status_report = self._generate_status_report(len(pages_text), txt_output_path, pages_text, translated_pages)
+            if success and output_path.endswith('.pdf'):
+                status_report = self._generate_status_report(len(pages_text), pdf_target_path, pages_text, translated_pages)
+            else:
+                txt_output_path = pdf_target_path.replace('.pdf', '_translation.txt')
+                status_report = self._generate_status_report(len(pages_text), txt_output_path, pages_text, translated_pages)
             
             logger.info("✅ Translation completed successfully!")
             return (result_image, status_report)
@@ -383,6 +391,39 @@ class AWSPDFTranslator:
         except Exception as e:
             logger.error(f"❌ Translation failed: {e}")
             return text  # 返回原文
+    
+    def _create_overlay_pdf(self, original_pdf_path: str, original_pages: List[str], 
+                           translated_pages: List[str], output_path: str) -> bool:
+        """創建覆蓋翻譯的PDF"""
+        try:
+            from .pdf_overlay_writer import PDFOverlayWriter
+            
+            # 準備頁面數據
+            pages_data = []
+            for i, (original, translated) in enumerate(zip(original_pages, translated_pages)):
+                page_data = {
+                    'page_number': i + 1,
+                    'original_text': original,
+                    'translated_text': translated
+                }
+                pages_data.append(page_data)
+            
+            # 創建PDF覆蓋寫入器
+            overlay_writer = PDFOverlayWriter()
+            
+            # 創建翻譯PDF
+            success = overlay_writer.create_translated_pdf(
+                original_pdf_path, pages_data, output_path
+            )
+            
+            # 清理
+            overlay_writer.cleanup()
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ PDF overlay creation failed: {e}")
+            return False
     
     def _create_translation_text_file(self, original_pages: List[str], translated_pages: List[str], output_path: str) -> bool:
         """創建純文字翻譯文件"""

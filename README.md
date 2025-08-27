@@ -7,18 +7,24 @@
 - 🤖 **AI智能內容過濾** - 使用Bedrock Claude自動識別並移除版權信息、頁碼等元數據
 - 🌐 **高質量翻譯** - Amazon Translate提供專業級翻譯服務
 - 🎯 **專有名詞保護** - 智能保護AWS、API、SDK等技術詞彙
-- 📄 **完整格式輸出** - 生成清晰的原文對照翻譯文件
+- 📄 **PDF格式保持** - 在原PDF上覆蓋翻譯，保持原始版面格式
+- 🔤 **繁體中文支援** - 完美支援繁體中文字體顯示
 - ⚡ **快速處理** - 7頁PDF僅需4秒完成翻譯
 
 ## 🏗️ 架構設計
 
 ```
-PDF文件 → AI內容分析 → Amazon Translate → 智能後處理 → 翻譯文件
+PDF文件 → AI內容分析 → Amazon Translate → PDF覆蓋寫入 → 翻譯PDF
 ```
 
 **使用的AWS服務：**
 - Amazon Bedrock (Claude-3-Sonnet) - AI內容分析
 - Amazon Translate - 文字翻譯
+
+**PDF處理技術：**
+- PDFPlumber - 文字提取
+- PyPDF - PDF操作
+- ReportLab - 中文字體渲染
 
 ## 📦 安裝步驟
 
@@ -130,7 +136,15 @@ AWS,Amazon,ElastiCache,Redis,API,SDK,JSON
 
 ## 📊 輸出格式
 
-翻譯完成後會生成UTF-8編碼的文字文件：
+### PDF格式輸出（主要）
+翻譯完成後會生成保持原格式的PDF文件：
+- 保留原始PDF的所有內容和格式
+- 在頁面下方添加半透明翻譯區域
+- 支援繁體中文字體顯示
+- 可直接用PDF閱讀器查看
+
+### 文字格式輸出（備用）
+如果PDF覆蓋失敗，會自動生成UTF-8編碼的文字文件：
 
 ```
 📄 Page 1
@@ -142,10 +156,6 @@ AWS Supports Valkey Project...
 AWS 支援 Valkey 專案...
 
 ==================================================
-
-📄 Page 2
-──────────────────────────────
-...
 ```
 
 ## 🛠️ 故障排除
