@@ -12,6 +12,16 @@ import torch
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+# 嘗試導入PDF替換模塊
+try:
+    from .pdf_text_replacer import PDFTextReplacer
+except ImportError:
+    try:
+        from pdf_text_replacer import PDFTextReplacer
+    except ImportError:
+        PDFTextReplacer = None
+        logging.warning("PDF文字替換模塊未找到，PDF替換功能將不可用")
+
 # 設置日誌
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,6 +62,14 @@ class AWSPDFTranslator:
                     "default": "<排除翻譯的字詞>\n每個換行代表一個單字\n例如：\nAWS\nAmazon\nElastiCache\nRedis\nRedis OSS\nMemoryDB\nValkey\nIDC",
                     "multiline": True,
                     "placeholder": "每行輸入一個不需要翻譯的詞彙"
+                }),
+                "create_translated_pdf": (["false", "true"], {
+                    "default": "false"
+                }),
+                "translated_pdf_path": ("STRING", {
+                    "default": "/path/to/translated.pdf",
+                    "multiline": False,
+                    "placeholder": "翻譯PDF輸出路徑 (當create_translated_pdf為true時)"
                 })
             }
         }
@@ -63,7 +81,8 @@ class AWSPDFTranslator:
     
     def translate_pdf(self, pdf_source_path: str, pdf_target_path: str, 
                      source_language: str, target_language: str, 
-                     aws_region: str, excluded_words: str) -> Tuple[torch.Tensor, str]:
+                     aws_region: str, excluded_words: str,
+                     create_translated_pdf: str, translated_pdf_path: str) -> Tuple[torch.Tensor, str]:
         """主要翻譯函數"""
         try:
             logger.info("🚀 AWS PDF Translator v4.2 - Stable & Compatible")
@@ -115,9 +134,44 @@ class AWSPDFTranslator:
             if not success:
                 return self._create_error_result("Failed to create translation file")
             
+            # 步驟4: 創建翻譯PDF（如果啟用）
+            pdf_replacement_success = False
+            if create_translated_pdf.lower() == "true":
+                if PDFTextReplacer is None:
+                    logger.warning("⚠️ PDF替換模塊不可用，跳過PDF創建")
+                else:
+                    logger.info("📄 Creating translated PDF with text replacement")
+                    try:
+                        # 創建翻譯映射
+                        translation_mapping = self._create_translation_mapping(pages_text, translated_pages)
+                        
+                        # 使用PDF文字替換器
+                        pdf_replacer = PDFTextReplacer()
+                        output_pdf_path = pdf_replacer.replace_pdf_text(
+                            pdf_source_path, 
+                            translation_mapping, 
+                            translated_pdf_path
+                        )
+                        
+                        if os.path.exists(output_pdf_path):
+                            pdf_replacement_success = True
+                            logger.info(f"✅ Translated PDF created: {output_pdf_path}")
+                        else:
+                            logger.warning("⚠️ PDF replacement completed but file not found")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ PDF replacement failed: {e}")
+            
             # 生成狀態報告
             txt_output_path = pdf_target_path.replace('.pdf', '_translation.txt')
-            status_report = self._generate_status_report(len(pages_text), txt_output_path, pages_text, translated_pages)
+            status_report = self._generate_status_report(
+                len(pages_text), 
+                txt_output_path, 
+                pages_text, 
+                translated_pages,
+                pdf_replacement_success,
+                translated_pdf_path if create_translated_pdf.lower() == "true" else None
+            )
             
             # 創建成功狀態圖像
             status_image = self._create_success_image()
@@ -712,8 +766,47 @@ class AWSPDFTranslator:
             logger.error(f"❌ Failed to create text file: {e}")
             return False
     
+    def _create_translation_mapping(self, original_pages: List[str], translated_pages: List[str]) -> dict:
+        """創建原文到翻譯的映射字典"""
+        translation_mapping = {}
+        
+        for original_page, translated_page in zip(original_pages, translated_pages):
+            # 按句子分割並創建映射
+            original_sentences = self._split_into_sentences(original_page)
+            translated_sentences = self._split_into_sentences(translated_page)
+            
+            # 如果句子數量相同，創建一對一映射
+            if len(original_sentences) == len(translated_sentences):
+                for orig, trans in zip(original_sentences, translated_sentences):
+                    if orig.strip() and trans.strip():
+                        translation_mapping[orig.strip()] = trans.strip()
+            else:
+                # 如果句子數量不同，嘗試按段落映射
+                original_paragraphs = original_page.split('\n\n')
+                translated_paragraphs = translated_page.split('\n\n')
+                
+                if len(original_paragraphs) == len(translated_paragraphs):
+                    for orig_para, trans_para in zip(original_paragraphs, translated_paragraphs):
+                        if orig_para.strip() and trans_para.strip():
+                            translation_mapping[orig_para.strip()] = trans_para.strip()
+                else:
+                    # 最後嘗試整頁映射
+                    if original_page.strip() and translated_page.strip():
+                        translation_mapping[original_page.strip()] = translated_page.strip()
+        
+        logger.info(f"📝 Created translation mapping with {len(translation_mapping)} entries")
+        return translation_mapping
+    
+    def _split_into_sentences(self, text: str) -> List[str]:
+        """將文字分割成句子"""
+        import re
+        # 使用正則表達式分割句子（支持中英文）
+        sentences = re.split(r'[.!?。！？]+', text)
+        return [s.strip() for s in sentences if s.strip()]
+    
     def _generate_status_report(self, pages_count: int, output_path: str, 
-                               original_pages: List[str] = None, translated_pages: List[str] = None) -> str:
+                               original_pages: List[str] = None, translated_pages: List[str] = None,
+                               pdf_replacement_success: bool = False, translated_pdf_path: str = None) -> str:
         """生成詳細狀態報告"""
         report = f"""📊 AWS PDF Translation Report
 ========================================
@@ -722,9 +815,18 @@ class AWSPDFTranslator:
 📁 Output file: {os.path.basename(output_path)}
 🌐 Service: Amazon Translate + Bedrock AI
 ========================================
-
-📝 Translation Preview:
 """
+        
+        # 添加PDF替換狀態
+        if translated_pdf_path:
+            if pdf_replacement_success:
+                report += f"📄 Translated PDF: ✅ Created successfully\n"
+                report += f"📁 PDF Location: {os.path.basename(translated_pdf_path)}\n"
+            else:
+                report += f"📄 Translated PDF: ❌ Creation failed\n"
+            report += "========================================\n"
+        
+        report += "\n📝 Translation Preview:\n"
         
         # 添加翻譯預覽
         if original_pages and translated_pages:
@@ -735,6 +837,9 @@ class AWSPDFTranslator:
                 report += "-" * 40 + "\n"
         
         report += f"\n✅ Complete translation saved to: {output_path}"
+        if pdf_replacement_success and translated_pdf_path:
+            report += f"\n✅ Translated PDF saved to: {translated_pdf_path}"
+        
         return report
     
     def _create_success_image(self) -> torch.Tensor:
