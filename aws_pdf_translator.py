@@ -130,20 +130,77 @@ class AWSPDFTranslator:
             return self._create_error_result(f"Translation failed: {str(e)}")
     
     def _extract_pdf_text(self, pdf_path: str, aws_region: str = None) -> List[str]:
-        """提取PDF文字"""
+        """提取PDF文字（包含圖片OCR）"""
         try:
             import pdfplumber
+            import fitz  # PyMuPDF
             
             pages_text = []
+            
+            # 使用 pdfplumber 提取文字
             with pdfplumber.open(pdf_path) as pdf:
+                # 同時使用 PyMuPDF 處理圖片
+                pdf_doc = fitz.open(pdf_path)
+                
                 for i, page in enumerate(pdf.pages):
+                    logger.info(f"  📄 Processing page {i+1}...")
+                    
+                    # 方法1: 提取純文字
                     text = page.extract_text()
+                    
+                    # 調試信息
+                    logger.info(f"  📊 Page {i+1} text analysis:")
+                    logger.info(f"      Text length: {len(text.strip()) if text else 0} chars")
+                    logger.info(f"      Word count: {len(text.strip().split()) if text else 0} words")
+                    logger.info(f"      Line count: {len([line for line in text.split('\\n') if line.strip()]) if text else 0} lines")
+                    logger.info(f"      Text preview: '{(text.strip()[:100] + '...') if text and len(text.strip()) > 100 else (text.strip() if text else 'No text')}'")
+                    
+                    # 方法2: 智能檢測是否需要OCR (基於圖片數量)
+                    needs_ocr = False
+                    ocr_reason = ""
+                    
+                    # 檢查頁面是否包含圖片
+                    image_list = pdf_doc[i].get_images()
+                    has_images = len(image_list) > 0
+                    
+                    if not text or len(text.strip()) < 50:  # 文字很少
+                        needs_ocr = True
+                        ocr_reason = "text too short (<50 chars)"
+                    elif has_images and len(text.strip()) < 300:  # 有圖片且文字不多
+                        needs_ocr = True
+                        ocr_reason = f"has {len(image_list)} images with limited text (<300 chars)"
+                    elif text and len(text.strip().split()) < 15:  # 詞數很少
+                        needs_ocr = True
+                        ocr_reason = "very few words (<15 words)"
+                    
+                    logger.info(f"      Images on page: {len(image_list)}")
+                    logger.info(f"      OCR needed: {needs_ocr} ({ocr_reason if needs_ocr else 'sufficient text content'})")
+                    
+                    if needs_ocr:
+                        logger.info(f"  🖼️ Page {i+1} appears to be image-heavy, trying OCR...")
+                        ocr_text = self._extract_text_from_images(pdf_doc[i], aws_region)
+                        if ocr_text and len(ocr_text.strip()) > len(text.strip() if text else ""):
+                            # 如果OCR提取的內容更多，使用OCR結果
+                            text = text + "\n\n" + ocr_text if text else ocr_text
+                            logger.info(f"  ✅ OCR enhanced content: {len(ocr_text)} additional characters")
+                        elif ocr_text:
+                            logger.info(f"  ℹ️ OCR found {len(ocr_text)} chars, keeping both text and OCR content")
+                            text = text + "\n\n" + ocr_text if text else ocr_text
+                        else:
+                            logger.warning(f"  ⚠️ OCR failed to extract any text from page {i+1}")
+                    else:
+                        logger.info(f"  📝 Page {i+1} has sufficient text, skipping OCR")
+                    
                     if text:
                         logger.info(f"  🤖 AI analyzing page {i+1} content...")
                         # 使用AI清理和過濾文字
                         cleaned_text = self._ai_filter_content(text, aws_region)
                         if cleaned_text:
                             pages_text.append(cleaned_text)
+                    else:
+                        logger.warning(f"  ⚠️ No text found on page {i+1}")
+                
+                pdf_doc.close()
             
             logger.info(f"✅ AI extracted and filtered text from {len(pages_text)} pages")
             return pages_text
@@ -151,6 +208,84 @@ class AWSPDFTranslator:
         except Exception as e:
             logger.error(f"❌ Failed to extract PDF text: {e}")
             return []
+    
+    def _extract_text_from_images(self, page, aws_region: str) -> str:
+        """從頁面圖片中提取文字（使用AWS Textract或本地OCR）"""
+        try:
+            # 方法1: 嘗試使用 AWS Textract (更準確)
+            if aws_region:
+                try:
+                    return self._aws_textract_ocr(page, aws_region)
+                except Exception as e:
+                    logger.warning(f"AWS Textract failed: {e}, falling back to local OCR")
+            
+            # 方法2: 使用本地 OCR (Tesseract)
+            return self._local_tesseract_ocr(page)
+            
+        except Exception as e:
+            logger.error(f"❌ OCR failed: {e}")
+            return ""
+    
+    def _aws_textract_ocr(self, page, aws_region: str) -> str:
+        """使用 AWS Textract 進行 OCR"""
+        try:
+            import boto3
+            import io
+            import fitz  # 添加這個導入
+            
+            # 將頁面轉換為圖片
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x放大提高OCR準確度
+            img_data = pix.tobytes("png")
+            
+            # 調用 AWS Textract
+            textract_client = boto3.client('textract', region_name=aws_region)
+            
+            response = textract_client.detect_document_text(
+                Document={'Bytes': img_data}
+            )
+            
+            # 提取文字
+            extracted_text = []
+            for block in response['Blocks']:
+                if block['BlockType'] == 'LINE':
+                    extracted_text.append(block['Text'])
+            
+            result = '\n'.join(extracted_text)
+            logger.info(f"  🔍 AWS Textract extracted {len(result)} characters")
+            return result
+            
+        except Exception as e:
+            logger.error(f"AWS Textract OCR failed: {e}")
+            raise e
+    
+    def _local_tesseract_ocr(self, page) -> str:
+        """使用本地 Tesseract 進行 OCR"""
+        try:
+            import pytesseract
+            from PIL import Image
+            import io
+            import fitz  # 添加這個導入
+            
+            # 將頁面轉換為圖片
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x放大提高OCR準確度
+            img_data = pix.tobytes("png")
+            
+            # 轉換為PIL圖片
+            img = Image.open(io.BytesIO(img_data))
+            
+            # 使用 Tesseract OCR (支持中英文)
+            custom_config = r'--oem 3 --psm 6 -l eng+chi_tra+chi_sim'
+            text = pytesseract.image_to_string(img, config=custom_config)
+            
+            logger.info(f"  🔍 Tesseract OCR extracted {len(text)} characters")
+            return text.strip()
+            
+        except ImportError:
+            logger.warning("⚠️ pytesseract not installed, skipping local OCR")
+            return ""
+        except Exception as e:
+            logger.error(f"Local Tesseract OCR failed: {e}")
+            return ""
     
     def _ai_filter_content(self, text: str, aws_region: str) -> str:
         """使用AI智能過濾內容"""
